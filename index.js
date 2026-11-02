@@ -93,7 +93,69 @@ async function run() {
     console.error("MongoDB connection failed:", error.message);
   }
 }
-run();
+run(    const bookingsCollection = db.collection("bookings");
+
+    const toMinutes = (t) => {
+      const [h, m] = t.split(":").map(Number);
+      return h * 60 + m;
+    };
+
+    // POST create booking (status: Pending)
+    app.post("/api/bookings", async (req, res) => {
+      const { studioId, date, startTime, endTime, userEmail, userName } = req.body;
+
+      if (!ObjectId.isValid(studioId)) {
+        return res.status(400).send({ message: "Invalid studio id" });
+      }
+      if (!date || !startTime || !endTime || !userEmail) {
+        return res.status(400).send({ message: "All booking fields are required" });
+      }
+      if (startTime >= endTime) {
+        return res.status(400).send({ message: "End time must be after start time" });
+      }
+      if (date < new Date().toISOString().slice(0, 10)) {
+        return res.status(400).send({ message: "You cannot book a past date" });
+      }
+
+      const studio = await studiosCollection.findOne({ _id: new ObjectId(studioId) });
+      if (!studio) return res.status(404).send({ message: "Studio not found" });
+      if (studio.ownerEmail === userEmail) {
+        return res.status(400).send({ message: "You cannot book your own studio" });
+      }
+
+      // Challenge 2: overlap check against Confirmed bookings
+      const clash = await bookingsCollection.findOne({
+        studioId,
+        date,
+        status: "Confirmed",
+        startTime: { $lt: endTime },
+        endTime: { $gt: startTime },
+      });
+      if (clash) {
+        return res.status(409).send({
+          message: `This studio is already booked from ${clash.startTime} to ${clash.endTime} on that date. Please pick another slot.`,
+        });
+      }
+
+      const hours = (toMinutes(endTime) - toMinutes(startTime)) / 60;
+      const booking = {
+        studioId,
+        studioTitle: studio.title,
+        studioImage: studio.image,
+        hostEmail: studio.ownerEmail,
+        userEmail,
+        userName,
+        date,
+        startTime,
+        endTime,
+        hours,
+        totalPrice: hours * studio.hourlyRate,
+        status: "Pending",
+        createdAt: new Date(),
+      };
+      const result = await bookingsCollection.insertOne(booking);
+      res.send(result);
+    });
 
 app.get("/", (req, res) => {
   res.send("StudioSpace server is running");
