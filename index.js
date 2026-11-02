@@ -88,12 +88,7 @@ async function run() {
       res.send(result);
     });
 
-    console.log("MongoDB connected");
-  } catch (error) {
-    console.error("MongoDB connection failed:", error.message);
-  }
-}
-run(    const bookingsCollection = db.collection("bookings");
+        const bookingsCollection = db.collection("bookings");
 
     const toMinutes = (t) => {
       const [h, m] = t.split(":").map(Number);
@@ -156,6 +151,76 @@ run(    const bookingsCollection = db.collection("bookings");
       const result = await bookingsCollection.insertOne(booking);
       res.send(result);
     });
+
+    // GET bookings by user (guest) or host
+    app.get("/api/bookings", async (req, res) => {
+      const { userEmail, hostEmail } = req.query;
+      if (!userEmail && !hostEmail) {
+        return res.status(400).send({ message: "userEmail or hostEmail is required" });
+      }
+      const query = {};
+      if (userEmail) query.userEmail = userEmail;
+      if (hostEmail) query.hostEmail = hostEmail;
+      res.send(await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray());
+    });
+
+    // PATCH cancel a pending booking
+    app.patch("/api/bookings/:id/cancel", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).send({ message: "Invalid booking id" });
+      }
+      const result = await bookingsCollection.updateOne(
+        { _id: new ObjectId(req.params.id), status: "Pending" },
+        { $set: { status: "Cancelled" } }
+      );
+      if (result.modifiedCount === 0) {
+        return res.status(400).send({ message: "Only pending bookings can be cancelled" });
+      }
+      res.send(result);
+    });
+
+    // PATCH host updates booking status
+    app.patch("/api/bookings/:id/status", async (req, res) => {
+      const { status } = req.body;
+      if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).send({ message: "Invalid booking id" });
+      }
+      if (!["Confirmed", "Completed"].includes(status)) {
+        return res.status(400).send({ message: "Invalid status" });
+      }
+      const booking = await bookingsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!booking) return res.status(404).send({ message: "Booking not found" });
+
+      if (status === "Confirmed") {
+        const clash = await bookingsCollection.findOne({
+          _id: { $ne: booking._id },
+          studioId: booking.studioId,
+          date: booking.date,
+          status: "Confirmed",
+          startTime: { $lt: booking.endTime },
+          endTime: { $gt: booking.startTime },
+        });
+        if (clash) {
+          return res.status(409).send({
+            message: "Another confirmed booking already overlaps this slot.",
+          });
+        }
+      }
+      const result = await bookingsCollection.updateOne(
+        { _id: booking._id },
+        { $set: { status } }
+      );
+      res.send(result);
+    });
+
+    console.log("MongoDB connected");
+  } catch (error) {
+    console.error("MongoDB connection failed:", error.message);
+  }
+}
+run();
 
 app.get("/", (req, res) => {
   res.send("StudioSpace server is running");
