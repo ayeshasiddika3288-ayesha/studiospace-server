@@ -2,14 +2,52 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
+const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 5000;
+const isProd = process.env.NODE_ENV === "production";
 
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+app.use(
+  cors({
+    origin: (process.env.CLIENT_URL || "").replace(/\/$/, ""),
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(cookieParser());
+
+// wait until MongoDB is connected (needed for Vercel serverless)
+let ready;
+app.use(async (req, res, next) => {
+  await ready;
+  next();
+});
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? "none" : "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+};
+
+// Challenge 1: JWT verification middleware (reads HTTPOnly cookie)
+const verifyToken = (req, res, next) => {
+  const token = req.cookies?.token;
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized: please login first" });
+  }
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res
+        .status(401)
+        .send({ message: "Unauthorized: invalid or expired token" });
+    }
+    req.user = decoded;
+    next();
+  });
+};
 
 const client = new MongoClient(process.env.MONGODB_URI, {
   serverApi: {
@@ -19,13 +57,35 @@ const client = new MongoClient(process.env.MONGODB_URI, {
   },
 });
 
+const toMinutes = (t) => {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+};
+
 async function run() {
   try {
     await client.connect();
     const db = client.db("studiospace");
     const studiosCollection = db.collection("studios");
+    const bookingsCollection = db.collection("bookings");
 
-    // GET all studios (filter, search, sort, limit)
+    // ---------- Auth cookie ----------
+    app.post("/api/jwt", (req, res) => {
+      const { token } = req.body;
+      if (!token) return res.status(400).send({ message: "Token is required" });
+      jwt.verify(token, process.env.JWT_SECRET, (err) => {
+        if (err) return res.status(401).send({ message: "Invalid token" });
+        res.cookie("token", token, cookieOptions).send({ success: true });
+      });
+    });
+
+    app.post("/api/logout", (req, res) => {
+      res
+        .clearCookie("token", { ...cookieOptions, maxAge: undefined })
+        .send({ success: true });
+    });
+
+    // ---------- Studios ----------
     app.get("/api/studios", async (req, res) => {
       const { category, search, ownerEmail, sort, limit } = req.query;
       const query = {};
@@ -41,7 +101,6 @@ async function run() {
       res.send(await cursor.toArray());
     });
 
-    // GET single studio
     app.get("/api/studios/:id", async (req, res) => {
       if (!ObjectId.isValid(req.params.id)) {
         return res.status(400).send({ message: "Invalid studio id" });
@@ -53,10 +112,11 @@ async function run() {
       res.send(studio);
     });
 
-    // POST add studio
-    app.post("/api/studios", async (req, res) => {
+    app.post("/api/studios", verifyToken, async (req, res) => {
       const studio = {
         ...req.body,
+        ownerEmail: req.user.email,
+        ownerName: req.body.ownerName || req.user.name,
         rating: 0,
         createdAt: new Date(),
       };
@@ -64,45 +124,53 @@ async function run() {
       res.send(result);
     });
 
-    // PUT update studio
-    app.put("/api/studios/:id", async (req, res) => {
+    app.put("/api/studios/:id", verifyToken, async (req, res) => {
       if (!ObjectId.isValid(req.params.id)) {
         return res.status(400).send({ message: "Invalid studio id" });
       }
-      const { _id, ...updatedData } = req.body;
+      const studio = await studiosCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!studio) return res.status(404).send({ message: "Studio not found" });
+      if (studio.ownerEmail !== req.user.email) {
+        return res.status(403).send({ message: "You can only edit your own studio" });
+      }
+      // eslint-disable-next-line no-unused-vars
+      const { _id, ownerEmail, ownerName, rating, createdAt, ...updatedData } =
+        req.body;
       const result = await studiosCollection.updateOne(
-        { _id: new ObjectId(req.params.id) },
+        { _id: studio._id },
         { $set: updatedData }
       );
       res.send(result);
     });
 
-    // DELETE studio
-    app.delete("/api/studios/:id", async (req, res) => {
+    app.delete("/api/studios/:id", verifyToken, async (req, res) => {
       if (!ObjectId.isValid(req.params.id)) {
         return res.status(400).send({ message: "Invalid studio id" });
       }
-      const result = await studiosCollection.deleteOne({
+      const studio = await studiosCollection.findOne({
         _id: new ObjectId(req.params.id),
       });
+      if (!studio) return res.status(404).send({ message: "Studio not found" });
+      if (studio.ownerEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({ message: "You can only delete your own studio" });
+      }
+      const result = await studiosCollection.deleteOne({ _id: studio._id });
       res.send(result);
     });
 
-        const bookingsCollection = db.collection("bookings");
-
-    const toMinutes = (t) => {
-      const [h, m] = t.split(":").map(Number);
-      return h * 60 + m;
-    };
-
-    // POST create booking (status: Pending)
-    app.post("/api/bookings", async (req, res) => {
-      const { studioId, date, startTime, endTime, userEmail, userName } = req.body;
+    // ---------- Bookings ----------
+    app.post("/api/bookings", verifyToken, async (req, res) => {
+      const { studioId, date, startTime, endTime, userName } = req.body;
+      const userEmail = req.user.email;
 
       if (!ObjectId.isValid(studioId)) {
         return res.status(400).send({ message: "Invalid studio id" });
       }
-      if (!date || !startTime || !endTime || !userEmail) {
+      if (!date || !startTime || !endTime) {
         return res.status(400).send({ message: "All booking fields are required" });
       }
       if (startTime >= endTime) {
@@ -112,7 +180,9 @@ async function run() {
         return res.status(400).send({ message: "You cannot book a past date" });
       }
 
-      const studio = await studiosCollection.findOne({ _id: new ObjectId(studioId) });
+      const studio = await studiosCollection.findOne({
+        _id: new ObjectId(studioId),
+      });
       if (!studio) return res.status(404).send({ message: "Studio not found" });
       if (studio.ownerEmail === userEmail) {
         return res.status(400).send({ message: "You cannot book your own studio" });
@@ -139,7 +209,7 @@ async function run() {
         studioImage: studio.image,
         hostEmail: studio.ownerEmail,
         userEmail,
-        userName,
+        userName: userName || req.user.name,
         date,
         startTime,
         endTime,
@@ -152,35 +222,42 @@ async function run() {
       res.send(result);
     });
 
-    // GET bookings by user (guest) or host
     app.get("/api/bookings", async (req, res) => {
       const { userEmail, hostEmail } = req.query;
       if (!userEmail && !hostEmail) {
-        return res.status(400).send({ message: "userEmail or hostEmail is required" });
+        return res
+          .status(400)
+          .send({ message: "userEmail or hostEmail is required" });
       }
       const query = {};
       if (userEmail) query.userEmail = userEmail;
       if (hostEmail) query.hostEmail = hostEmail;
-      res.send(await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray());
+      res.send(
+        await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray()
+      );
     });
 
-    // PATCH cancel a pending booking
-    app.patch("/api/bookings/:id/cancel", async (req, res) => {
+    app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
       if (!ObjectId.isValid(req.params.id)) {
         return res.status(400).send({ message: "Invalid booking id" });
       }
       const result = await bookingsCollection.updateOne(
-        { _id: new ObjectId(req.params.id), status: "Pending" },
+        {
+          _id: new ObjectId(req.params.id),
+          userEmail: req.user.email,
+          status: "Pending",
+        },
         { $set: { status: "Cancelled" } }
       );
       if (result.modifiedCount === 0) {
-        return res.status(400).send({ message: "Only pending bookings can be cancelled" });
+        return res
+          .status(400)
+          .send({ message: "Only your pending bookings can be cancelled" });
       }
       res.send(result);
     });
 
-    // PATCH host updates booking status
-    app.patch("/api/bookings/:id/status", async (req, res) => {
+    app.patch("/api/bookings/:id/status", verifyToken, async (req, res) => {
       const { status } = req.body;
       if (!ObjectId.isValid(req.params.id)) {
         return res.status(400).send({ message: "Invalid booking id" });
@@ -192,6 +269,11 @@ async function run() {
         _id: new ObjectId(req.params.id),
       });
       if (!booking) return res.status(404).send({ message: "Booking not found" });
+      if (booking.hostEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({ message: "Only the studio host can update this booking" });
+      }
 
       if (status === "Confirmed") {
         const clash = await bookingsCollection.findOne({
@@ -220,12 +302,16 @@ async function run() {
     console.error("MongoDB connection failed:", error.message);
   }
 }
-run();
+ready = run();
 
 app.get("/", (req, res) => {
   res.send("StudioSpace server is running");
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+if (!isProd) {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
+}
+
+module.exports = app;
