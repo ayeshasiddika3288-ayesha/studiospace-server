@@ -202,7 +202,8 @@ async function run() {
         });
       }
 
-      const hours = (toMinutes(endTime) - toMinutes(startTime)) / 60;
+            const hours = Math.round(((toMinutes(endTime) - toMinutes(startTime)) / 60) * 100) / 100;
+
       const booking = {
         studioId,
         studioTitle: studio.title,
@@ -214,7 +215,7 @@ async function run() {
         startTime,
         endTime,
         hours,
-        totalPrice: hours * studio.hourlyRate,
+        totalPrice: Math.round(hours * studio.hourlyRate * 100) / 100,
         status: "Pending",
         createdAt: new Date(),
       };
