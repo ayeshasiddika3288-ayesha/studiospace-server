@@ -110,6 +110,7 @@ app.use(async (req, res, next) => {
     const db = await getDb();
     req.studios = db.collection("studios");
     req.bookings = db.collection("bookings");
+    req.reviews = db.collection("reviews");
     next();
   } catch (error) {
     console.error("MongoDB connection failed:", error.message);
@@ -125,7 +126,10 @@ app.get("/api/studios", async (req, res) => {
   const query = {};
   if (category) query.category = category;
   if (ownerEmail) query.ownerEmail = ownerEmail;
-  if (search) query.title = { $regex: search, $options: "i" };
+  if (search) {
+    const safeSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    query.title = { $regex: safeSearch, $options: "i" };
+  }
 
   let cursor = req.studios.find(query);
   if (sort === "rating") cursor = cursor.sort({ rating: -1 });
@@ -190,6 +194,72 @@ app.delete("/api/studios/:id", verifyToken, async (req, res) => {
   res.send(result);
 });
 
+// ---------- Reviews ----------
+app.get("/api/studios/:id/reviews", async (req, res) => {
+  const reviews = await req.reviews
+    .find({ studioId: req.params.id })
+    .sort({ createdAt: -1 })
+    .toArray();
+  res.send(reviews);
+});
+
+app.post("/api/studios/:id/reviews", verifyToken, async (req, res) => {
+  const { id } = req.params;
+  const rating = Number(req.body.rating);
+  const comment = String(req.body.comment || "").trim();
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).send({ message: "Invalid studio id" });
+  }
+  if (!(rating >= 1 && rating <= 5) || !comment) {
+    return res
+      .status(400)
+      .send({ message: "Rating (1-5) and comment are required" });
+  }
+
+  const booked = await req.bookings.findOne({
+    studioId: id,
+    userEmail: req.user.email,
+    status: { $in: ["Confirmed", "Completed"] },
+  });
+  if (!booked) {
+    return res
+      .status(403)
+      .send({ message: "Only guests with a confirmed booking can review" });
+  }
+  const already = await req.reviews.findOne({
+    studioId: id,
+    userEmail: req.user.email,
+  });
+  if (already) {
+    return res
+      .status(409)
+      .send({ message: "You already reviewed this studio" });
+  }
+
+  await req.reviews.insertOne({
+    studioId: id,
+    userEmail: req.user.email,
+    userName: req.user.name,
+    rating,
+    comment,
+    createdAt: new Date(),
+  });
+
+  const [stats] = await req.reviews
+    .aggregate([
+      { $match: { studioId: id } },
+      { $group: { _id: null, avg: { $avg: "$rating" } } },
+    ])
+    .toArray();
+  const avg = Math.round(stats.avg * 10) / 10;
+  await req.studios.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { rating: avg } }
+  );
+  res.send({ success: true, rating: avg });
+});
+
 // ---------- Bookings ----------
 app.post("/api/bookings", verifyToken, async (req, res) => {
   const { studioId, date, startTime, endTime, userName } = req.body;
@@ -249,12 +319,18 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
   res.send(result);
 });
 
-app.get("/api/bookings", async (req, res) => {
+app.get("/api/bookings", verifyToken, async (req, res) => {
   const { userEmail, hostEmail } = req.query;
+  const me = req.user.email;
   if (!userEmail && !hostEmail) {
     return res
       .status(400)
       .send({ message: "userEmail or hostEmail is required" });
+  }
+  if ((userEmail && userEmail !== me) || (hostEmail && hostEmail !== me)) {
+    return res
+      .status(403)
+      .send({ message: "You can only view your own bookings" });
   }
   const query = {};
   if (userEmail) query.userEmail = userEmail;
