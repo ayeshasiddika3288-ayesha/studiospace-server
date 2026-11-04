@@ -306,7 +306,17 @@ async function run() {
 ready = run();
 
 app.get("/", (req, res) => {
-  res.send("StudioSpace server is running");
+  res.send({
+    message: "StudioSpace server is running",
+    endpoints: {
+      studios: "/api/studios",
+      studiosFeatured: "/api/studios?limit=6",
+      studiosByCategory: "/api/studios?category=Photo%20Studio",
+      studioById: "/api/studios/:id",
+      bookingsByGuest: "/api/bookings?userEmail=<email>",
+      bookingsByHost: "/api/bookings?hostEmail=<email>",
+    },
+  });
 });
 
 if (!isProd) {
